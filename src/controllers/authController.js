@@ -223,3 +223,120 @@ export const login = async (req, res) => {
     });
   }
 };
+
+export const forgotPassword = async (req, res) => {
+  try {
+    const { phoneNumber } = req.body;
+
+    if (!phoneNumber) {
+      return res.status(400).json({
+        message: 'Phone number is required'
+      });
+    }
+
+    const normalizedPhone = normalizePhoneNumber(phoneNumber);
+
+    if (!isValidPhoneNumber(normalizedPhone)) {
+      return res.status(400).json({
+        message: 'Phone number must be in E.164 format, for example +996700123456'
+      });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { phoneNumber: normalizedPhone }
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        message: 'User with this phone number was not found'
+      });
+    }
+
+    const verification = await sendOtpSms(normalizedPhone);
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+
+    const pendingReset = await prisma.pendingPasswordReset.create({
+      data: {
+        phoneNumber: normalizedPhone,
+        verificationSid: verification.sid,
+        expiresAt
+      }
+    });
+
+    return res.status(200).json({
+      message: 'Password reset OTP sent successfully',
+      pendingResetId: pendingReset.id
+    });
+  } catch (error) {
+    console.error('FORGOT PASSWORD ERROR:', error);
+    return res.status(500).json({
+      message: 'Server error during forgot password'
+    });
+  }
+};
+
+export const resetPassword = async (req, res) => {
+  try {
+    const { pendingResetId, otpCode, newPassword } = req.body;
+
+    if (!pendingResetId || !otpCode || !newPassword) {
+      return res.status(400).json({
+        message: 'Pending reset ID, OTP code, and new password are required'
+      });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        message: 'New password must be at least 6 characters long'
+      });
+    }
+
+    const pendingReset = await prisma.pendingPasswordReset.findUnique({
+      where: { id: pendingResetId }
+    });
+
+    if (!pendingReset) {
+      return res.status(404).json({
+        message: 'Pending password reset not found'
+      });
+    }
+
+    if (new Date() > pendingReset.expiresAt) {
+      await prisma.pendingPasswordReset.delete({
+        where: { id: pendingReset.id }
+      });
+
+      return res.status(400).json({
+        message: 'OTP code has expired'
+      });
+    }
+
+    const check = await checkOtpCode(pendingReset.verificationSid, otpCode);
+
+    if (check.status !== 'approved') {
+      return res.status(400).json({
+        message: 'Invalid OTP code'
+      });
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+
+    await prisma.user.update({
+      where: { phoneNumber: pendingReset.phoneNumber },
+      data: { passwordHash }
+    });
+
+    await prisma.pendingPasswordReset.delete({
+      where: { id: pendingReset.id }
+    });
+
+    return res.status(200).json({
+      message: 'Password has been reset successfully'
+    });
+  } catch (error) {
+    console.error('RESET PASSWORD ERROR:', error);
+    return res.status(500).json({
+      message: 'Server error during password reset'
+    });
+  }
+};
