@@ -1,18 +1,24 @@
 import prisma from '../config/prisma.js';
 
+import { normalizePhoneNumber } from '../utils/validation.js';
+
 export const transferMoney = async (req, res) => {
   try {
     const userId = req.user.userId;
-    const { receiverAccountNumber, amount } = req.body;
+    const { transferMethod, receiverValue, amount } = req.body;
 
-    if (!receiverAccountNumber || !amount) {
-      return res.status(400).json({ message: 'Receiver account number and amount are required' });
+    if (!transferMethod || !receiverValue || !amount) {
+      return res.status(400).json({
+        message: 'Transfer method, receiver value, and amount are required'
+      });
     }
 
     const transferAmount = Number(amount);
 
     if (isNaN(transferAmount) || transferAmount <= 0) {
-      return res.status(400).json({ message: 'Amount must be a positive number' });
+      return res.status(400).json({
+        message: 'Amount must be a positive number'
+      });
     }
 
     const senderAccount = await prisma.account.findUnique({
@@ -20,23 +26,50 @@ export const transferMoney = async (req, res) => {
     });
 
     if (!senderAccount) {
-      return res.status(404).json({ message: 'Sender account not found' });
+      return res.status(404).json({
+        message: 'Sender account not found'
+      });
     }
 
-    if (senderAccount.accountNumber === receiverAccountNumber) {
-      return res.status(400).json({ message: 'You cannot transfer money to your own account' });
-    }
+    let receiverAccount = null;
 
-    const receiverAccount = await prisma.account.findUnique({
-      where: { accountNumber: receiverAccountNumber }
-    });
+    if (transferMethod === 'ACCOUNT') {
+      receiverAccount = await prisma.account.findUnique({
+        where: { accountNumber: receiverValue }
+      });
+    } else if (transferMethod === 'PHONE') {
+      const normalizedPhone = normalizePhoneNumber(receiverValue);
+
+      const receiverUser = await prisma.user.findUnique({
+        where: { phoneNumber: normalizedPhone },
+        include: { account: true }
+      });
+
+      if (receiverUser) {
+        receiverAccount = receiverUser.account;
+      }
+    } else {
+      return res.status(400).json({
+        message: 'Invalid transfer method. Use ACCOUNT or PHONE'
+      });
+    }
 
     if (!receiverAccount) {
-      return res.status(404).json({ message: 'Receiver account not found' });
+      return res.status(404).json({
+        message: 'Receiver account not found'
+      });
+    }
+
+    if (senderAccount.id === receiverAccount.id) {
+      return res.status(400).json({
+        message: 'You cannot transfer money to yourself'
+      });
     }
 
     if (senderAccount.balance < transferAmount) {
-      return res.status(400).json({ message: 'Insufficient balance' });
+      return res.status(400).json({
+        message: 'Insufficient balance'
+      });
     }
 
     const result = await prisma.$transaction(async (tx) => {
@@ -63,7 +96,7 @@ export const transferMoney = async (req, res) => {
           senderAccountId: senderAccount.id,
           receiverAccountId: receiverAccount.id,
           amount: transferAmount,
-          type: 'TRANSFER',
+          type: transferMethod === 'PHONE' ? 'TRANSFER_BY_PHONE' : 'TRANSFER_BY_ACCOUNT',
           status: 'SUCCESS'
         }
       });
@@ -76,13 +109,23 @@ export const transferMoney = async (req, res) => {
     });
 
     return res.status(201).json({
-      message: 'Transfer completed successfully',
-      transaction: result.transaction,
-      senderBalance: result.updatedSender.balance
-    });
+  message: 'Transfer completed successfully',
+  transaction: {
+    id: result.transaction.id,
+    amount: result.transaction.amount,
+    type: result.transaction.type,
+    status: result.transaction.status,
+    createdAt: result.transaction.createdAt,
+    receiverValue,
+    transferMethod
+  },
+  senderBalance: result.updatedSender.balance
+});
   } catch (error) {
     console.error('TRANSFER ERROR:', error);
-    return res.status(500).json({ message: 'Server error during transfer' });
+    return res.status(500).json({
+      message: 'Server error during transfer'
+    });
   }
 };
 
