@@ -9,6 +9,9 @@
     "start": "node src/server.js",
     "postinstall": "npx prisma generate"
   },
+  "engines": {
+    "node": "20.0"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
